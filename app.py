@@ -322,7 +322,12 @@ def _run_pipeline() -> Dict:
     pacing_df = optimization_rules.build_pacing_table(campaign_kpi_df)
     qa_df = data_cleaner.build_qa_dataframe(cleaned)
 
-    # DeepSeek
+    # Prioritization (rule-based, before AI call so we can also send it)
+    prioritized_df = optimization_rules.prioritize_recommendations(
+        health_df, site_recs, zip_remove, zip_add, pmp_review_df,
+    )
+
+    # DeepSeek (only summarized data + top flagged rows are sent)
     payload = deepseek_agent.build_summary_payload(
         campaign_summary=summary,
         health_df=health_df,
@@ -330,6 +335,7 @@ def _run_pipeline() -> Dict:
         zip_recs_remove=zip_remove,
         zip_recs_add=zip_add,
         pmp_review_df=pmp_review_df,
+        prioritized_df=prioritized_df,
         build_doc_text=st.session_state.build_doc_text or "",
         exclusion_summary={
             "rows": int(len(exclusion_df)) if exclusion_df is not None else 0,
@@ -337,6 +343,7 @@ def _run_pipeline() -> Dict:
         approved_zip_summary={
             "rows": int(len(approved_zip_df)) if approved_zip_df is not None else 0,
         },
+        qa_summary=qa_df.to_dict(orient="records") if qa_df is not None and not qa_df.empty else [],
         case_studies=st.session_state.case_studies or "",
     )
     final_recommendation = deepseek_agent.generate_recommendation(payload)
@@ -356,7 +363,16 @@ def _run_pipeline() -> Dict:
         "pmp_review_df": pmp_review_df,
         "pacing_df": pacing_df,
         "qa_df": qa_df,
+        "prioritized_df": prioritized_df,
         "final_recommendation": final_recommendation,
+        "context_warnings": guardrails.context_warnings(
+            qa_df=qa_df,
+            site_recs=site_recs,
+            zip_remove=zip_remove,
+            zip_add=zip_add,
+            pmp_review_df=pmp_review_df,
+            final_recommendation=final_recommendation,
+        ),
     }
 
 
@@ -375,10 +391,24 @@ def _fmt_int(v):
     return "—" if v is None or pd.isna(v) else f"{int(v):,}"
 
 
+PRIORITY_ICON = {"High": "🔴", "Medium": "🟠", "Low": "🟡"}
+
+
+def _priority_chip(priority: str) -> str:
+    return f"{PRIORITY_ICON.get(priority, '⚪')} {priority or '—'}"
+
+
 def _render_dashboard(results: Dict):
     summary = results["summary"]
     final = results["final_recommendation"]
     health_df = results["health_df"]
+
+    warnings = results.get("context_warnings") or []
+    if warnings:
+        with st.container():
+            st.warning("**Guardrail checks for this run**")
+            for w in warnings:
+                st.markdown(f"- {w}")
 
     st.subheader("Campaign health")
     if health_df is not None and not health_df.empty and "health_status" in health_df.columns:
@@ -388,6 +418,7 @@ def _render_dashboard(results: Dict):
             name = row.get("campaign_name") or row.get("campaign_id") or "Campaign"
             icon = {
                 "Healthy": "✅",
+                "Underpacing": "⚠️",
                 "Underpacing but efficient": "⚠️",
                 "Underpacing and inefficient": "🚨",
                 "Overspending and inefficient": "🚨",
@@ -395,7 +426,11 @@ def _render_dashboard(results: Dict):
                 "Review": "ℹ️",
                 "Unknown": "❔",
             }.get(status, "ℹ️")
-            st.markdown(f"{icon} **{name}** — {status}  \n_{reason}_")
+            diag = (row.get("underpacing_diagnosis") or "").strip()
+            line = f"{icon} **{name}** — {status}  \n_{reason}_"
+            if diag:
+                line += f"  \n🔎 _Diagnosis:_ {diag}"
+            st.markdown(line)
     else:
         st.info("Upload a campaign report and run the analysis to see health status.")
 
@@ -430,20 +465,36 @@ def _render_dashboard(results: Dict):
     else:
         st.caption("None reported by the AI summary.")
 
-    st.subheader("Top recommendations")
+    st.subheader("Prioritized recommendations (rule-based)")
+    pdf = results.get("prioritized_df")
+    if pdf is not None and not pdf.empty:
+        counts = pdf["priority"].value_counts()
+        cA, cB, cC = st.columns(3)
+        cA.metric("🔴 High", int(counts.get("High", 0)))
+        cB.metric("🟠 Medium", int(counts.get("Medium", 0)))
+        cC.metric("🟡 Low", int(counts.get("Low", 0)))
+        display = pdf.copy()
+        display["priority"] = display["priority"].map(_priority_chip)
+        st.dataframe(display, use_container_width=True, hide_index=True)
+    else:
+        st.success("✅ No rule-based optimization actions needed right now.")
+
+    st.subheader("AI recommendations")
     recs = final.get("recommendations") or []
     if recs:
         rec_rows = []
         for r in recs:
             if isinstance(r, dict):
                 rec_rows.append({
+                    "priority": _priority_chip(r.get("priority", "Medium")),
                     "area": r.get("area"),
                     "action": r.get("action"),
                     "rationale": r.get("rationale"),
                     "evidence": r.get("evidence"),
                 })
             else:
-                rec_rows.append({"area": "—", "action": str(r), "rationale": "", "evidence": ""})
+                rec_rows.append({"priority": "—", "area": "—", "action": str(r),
+                                  "rationale": "", "evidence": ""})
         st.dataframe(pd.DataFrame(rec_rows), use_container_width=True, hide_index=True)
     else:
         st.caption("No AI recommendations available — see rule-based tables below.")
@@ -458,11 +509,20 @@ def _render_dashboard(results: Dict):
 # ---------------------------------------------------------------------------
 def _render_detail_tabs(results: Dict):
     tabs = st.tabs([
-        "Pacing", "KPI tables", "Site recs", "Zip recs", "PMP review",
-        "Do not change", "Data QA",
+        "Prioritized", "Pacing", "KPI tables", "Site recs", "Zip recs",
+        "PMP review", "Do not change", "Data QA",
     ])
 
     with tabs[0]:
+        pdf = results.get("prioritized_df")
+        if pdf is None or pdf.empty:
+            st.success("✅ No optimization actions needed right now.")
+        else:
+            display = pdf.copy()
+            display["priority"] = display["priority"].map(_priority_chip)
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+    with tabs[1]:
         df = results.get("pacing_df")
         if df is not None and not df.empty:
             st.dataframe(df, use_container_width=True, hide_index=True)
@@ -470,7 +530,7 @@ def _render_detail_tabs(results: Dict):
             st.info("No pacing data — upload a campaign report with budget + spend "
                     "and set the flight dates.")
 
-    with tabs[1]:
+    with tabs[2]:
         st.markdown("**Campaign KPI**")
         st.dataframe(results.get("campaign_kpi_df", pd.DataFrame()),
                      use_container_width=True, hide_index=True)
@@ -481,45 +541,69 @@ def _render_detail_tabs(results: Dict):
         st.dataframe(results.get("zip_kpi_df", pd.DataFrame()),
                      use_container_width=True, hide_index=True)
 
-    with tabs[2]:
+    with tabs[3]:
         df = results.get("site_recs")
         if df is None or df.empty:
             st.success("✅ No site exclusion candidates given current thresholds.")
         else:
             st.warning(f"⚠️ {len(df)} site(s) flagged for exclusion review")
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            display = df.copy()
+            if "priority" in display.columns:
+                display["priority"] = display["priority"].map(_priority_chip)
+            st.dataframe(display, use_container_width=True, hide_index=True)
 
-    with tabs[3]:
+    with tabs[4]:
         zr = results.get("zip_remove")
         za = results.get("zip_add")
         if (zr is None or zr.empty) and (za is None or za.empty):
             st.success("✅ No zip changes recommended right now.")
         if zr is not None and not zr.empty:
             st.warning(f"⚠️ {len(zr)} ZIP(s) recommended for removal/reduction")
-            st.dataframe(zr, use_container_width=True, hide_index=True)
+            d = zr.copy()
+            if "priority" in d.columns:
+                d["priority"] = d["priority"].map(_priority_chip)
+            st.dataframe(d, use_container_width=True, hide_index=True)
         if za is not None and not za.empty:
             st.info(f"➕ {len(za)} approved ZIP(s) suggested for expansion")
-            st.dataframe(za, use_container_width=True, hide_index=True)
+            d = za.copy()
+            if "priority" in d.columns:
+                d["priority"] = d["priority"].map(_priority_chip)
+            st.dataframe(d, use_container_width=True, hide_index=True)
 
-    with tabs[4]:
+    with tabs[5]:
         df = results.get("pmp_review_df")
         if df is None or df.empty:
             st.info("No PMP report uploaded.")
         else:
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            display = df.copy()
+            if "priority" in display.columns:
+                display["priority"] = display["priority"].map(_priority_chip)
+            st.dataframe(display, use_container_width=True, hide_index=True)
 
-    with tabs[5]:
+    with tabs[6]:
         st.dataframe(guardrails.get_do_not_change_df(),
                      use_container_width=True, hide_index=True)
         for item in (results["final_recommendation"].get("do_not_change") or []):
             st.markdown(f"- 🛑 {item}")
+        warns = results.get("context_warnings") or []
+        if warns:
+            st.markdown("**Context-specific warnings for this run**")
+            for w in warns:
+                st.markdown(f"- {w}")
 
-    with tabs[6]:
+    with tabs[7]:
         df = results.get("qa_df")
         if df is None or df.empty:
             st.info("No QA summary yet.")
         else:
             st.dataframe(df, use_container_width=True, hide_index=True)
+            missing_required = df[df.get("missing_required_fields", "").astype(str).str.len() > 0] \
+                if "missing_required_fields" in df.columns else pd.DataFrame()
+            if not missing_required.empty:
+                st.error(
+                    "🚨 One or more reports are missing required fields. "
+                    "Recommendations from these reports may be unreliable."
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +661,7 @@ def main():
             final_recommendation=results.get("final_recommendation", {}),
             do_not_change_df=guardrails.get_do_not_change_df(),
             qa_df=results.get("qa_df"),
+            prioritized_df=results.get("prioritized_df"),
         )
         st.download_button(
             label="⬇️ Download recommendation report (Excel)",

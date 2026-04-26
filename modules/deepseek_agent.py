@@ -30,12 +30,58 @@ except Exception:  # pragma: no cover - import error surfaced at runtime
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _df_head_records(df: Optional[pd.DataFrame], n: int = 25) -> List[Dict]:
-    """Convert the first n rows of a DataFrame into JSON-serializable dicts."""
+# Whitelisted columns we are willing to send for each section. Anything
+# else is dropped before serialization. Raw row-level reports are NEVER
+# sent — we send aggregated summaries + top flagged rows only.
+SAFE_COLUMNS: Dict[str, List[str]] = {
+    "health": [
+        "campaign_id", "campaign_name", "health_status", "health_reason",
+        "underpacing_diagnosis", "pacing_calc", "cpa_calc", "cpm_calc",
+        "viewability", "out_of_geo", "ivt", "spend", "budget",
+        "budget_remaining", "daily_required_spend",
+    ],
+    "site": [
+        "site", "app", "spend", "impressions", "conversions", "cpa_calc",
+        "viewability", "out_of_geo", "ivt", "recommendation", "reason",
+        "confidence", "priority",
+    ],
+    "zip_remove": [
+        "zip", "dma", "spend", "impressions", "conversions", "cpa_calc",
+        "out_of_geo", "recommendation", "reason", "confidence", "priority",
+    ],
+    "zip_add": ["zip", "dma", "recommendation", "reason", "confidence", "priority"],
+    "pmp": [
+        "deal_id", "deal_name", "publisher", "floor_cpm", "bid", "spend",
+        "impressions", "win_rate", "cpa", "viewability", "floor_gap_pct",
+        "flags", "recommendation", "severity", "confidence", "priority",
+    ],
+    "priorities": ["priority", "area", "subject", "action", "rationale", "confidence"],
+}
+
+# Hard limits on how many rows we'll send per section. Keeps the prompt
+# small and ensures we are sending top *flagged* rows, not raw reports.
+ROW_LIMITS: Dict[str, int] = {
+    "health": 20,
+    "site": 15,
+    "zip_remove": 15,
+    "zip_add": 15,
+    "pmp": 15,
+    "priorities": 25,
+}
+
+
+def _safe_records(
+    df: Optional[pd.DataFrame],
+    section: str,
+) -> List[Dict]:
+    """Return at most N JSON-safe records using only whitelisted columns."""
     if df is None or df.empty:
         return []
-    safe = df.head(n).copy()
-    # Convert any non-JSON-friendly types
+    cols = [c for c in SAFE_COLUMNS.get(section, []) if c in df.columns]
+    if not cols:
+        return []
+    limit = ROW_LIMITS.get(section, 15)
+    safe = df[cols].head(limit).copy()
     for col in safe.columns:
         if pd.api.types.is_datetime64_any_dtype(safe[col]):
             safe[col] = safe[col].astype(str)
@@ -50,19 +96,27 @@ def build_summary_payload(
     zip_recs_remove: Optional[pd.DataFrame],
     zip_recs_add: Optional[pd.DataFrame],
     pmp_review_df: Optional[pd.DataFrame],
+    prioritized_df: Optional[pd.DataFrame],
     build_doc_text: str,
     exclusion_summary: Dict,
     approved_zip_summary: Dict,
+    qa_summary: Optional[List[Dict]],
     case_studies: Optional[str],
 ) -> Dict:
-    """Assemble the JSON-friendly payload sent to DeepSeek."""
+    """Assemble the JSON-friendly payload sent to DeepSeek.
+
+    Only summaries + a small number of top *flagged* rows are sent —
+    never the raw uploaded reports.
+    """
     return {
         "kpi_summary": campaign_summary,
-        "campaign_health": _df_head_records(health_df, 50),
-        "site_recommendation_candidates": _df_head_records(site_recs, 50),
-        "zip_remove_candidates": _df_head_records(zip_recs_remove, 50),
-        "zip_add_candidates": _df_head_records(zip_recs_add, 50),
-        "pmp_findings": _df_head_records(pmp_review_df, 50),
+        "data_qa_summary": (qa_summary or [])[:10],
+        "campaign_health_top": _safe_records(health_df, "health"),
+        "site_recommendation_candidates_top": _safe_records(site_recs, "site"),
+        "zip_remove_candidates_top": _safe_records(zip_recs_remove, "zip_remove"),
+        "zip_add_candidates_top": _safe_records(zip_recs_add, "zip_add"),
+        "pmp_findings_top": _safe_records(pmp_review_df, "pmp"),
+        "prioritized_recommendations_top": _safe_records(prioritized_df, "priorities"),
         "build_doc_constraints": (build_doc_text or "")[:4000],
         "exclusion_list_summary": exclusion_summary,
         "approved_zip_list_summary": approved_zip_summary,
@@ -77,10 +131,14 @@ SYSTEM_PROMPT = (
     "You are a senior programmatic advertising optimization analyst. "
     "You produce recommendations for a human reviewer. You never instruct "
     "the user to make automatic DSP changes, pause campaigns, change "
-    "budgets, or remove brand-safety/verification settings. Use the "
-    "rule-based findings provided as the primary evidence; treat case "
-    "studies as weaker, supporting evidence only. Be specific, cite the "
-    "relevant numbers, and call out missing data instead of guessing."
+    "budgets, or remove brand-safety / verification settings. "
+    "You ONLY receive aggregated metrics and the top flagged rows — "
+    "never raw row-level reports. Use the rule-based findings as the "
+    "primary evidence; treat web case studies as weaker, supporting "
+    "evidence only. Be specific, cite the relevant numbers, and when "
+    "data is missing or low-confidence, say so explicitly instead of "
+    "guessing. Down-weight any recommendation whose rule-based "
+    "confidence is below 0.4."
 )
 
 USER_INSTRUCTIONS = """\
@@ -88,19 +146,23 @@ Using the data below, produce a single JSON object with these keys:
 
 - campaign_id (string or null)
 - campaign_name (string or null)
-- health_status (one of: "Healthy", "Underpacing but efficient",
+- health_status (one of: "Healthy", "Underpacing", "Underpacing but efficient",
   "Underpacing and inefficient", "Overspending and inefficient",
   "Overspending but efficient", "Review", "Unknown")
 - confidence_score (float between 0 and 1 indicating how much you trust
   the recommendation given data quality and volume)
 - executive_summary (2-4 sentence plain-English overview)
 - top_issues (array of short strings)
-- recommendations (array of objects with: area, action, rationale,
-  evidence — each a string. "area" is one of "campaign", "site", "zip",
-  "pmp", "creative", "measurement")
+- recommendations (array of objects with these string fields:
+  area (one of "campaign", "site", "zip", "pmp", "creative",
+  "measurement", "audience"), priority ("High" | "Medium" | "Low"),
+  action, rationale, evidence). Sort the array High → Low. Use the
+  rule-based "prioritized_recommendations_top" as your primary input
+  for this list.
 - do_not_change (array of short strings — guardrails the human reviewer
   should preserve, e.g. brand safety, viewability rails)
-- human_next_steps (array of short strings the analyst should do next)
+- human_next_steps (array of short strings the analyst should do next,
+  ordered most-important first)
 
 Return ONLY valid JSON. No markdown fences, no prose outside the JSON.
 """

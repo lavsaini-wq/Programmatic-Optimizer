@@ -14,6 +14,7 @@ import pandas as pd
 
 
 SHEET_ORDER = [
+    "Prioritized Recommendations",
     "Campaign Summary",
     "Pacing Analysis",
     "KPI Analysis",
@@ -50,6 +51,7 @@ def build_excel(
     final_recommendation: Dict,
     do_not_change_df: Optional[pd.DataFrame],
     qa_df: Optional[pd.DataFrame],
+    prioritized_df: Optional[pd.DataFrame] = None,
 ) -> bytes:
     """Return the binary contents of the assembled .xlsx file."""
 
@@ -78,6 +80,10 @@ def build_excel(
     )
 
     sheets = {
+        "Prioritized Recommendations": _df_or_placeholder(
+            prioritized_df,
+            "No prioritized recommendations — campaigns appear healthy or no data was provided",
+        ),
         "Campaign Summary": _df_or_placeholder(campaign_summary_df, "No campaign report uploaded"),
         "Pacing Analysis": _df_or_placeholder(pacing_df, "No pacing data calculated"),
         "KPI Analysis": _df_or_placeholder(kpi_df, "No KPI data calculated"),

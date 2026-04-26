@@ -176,7 +176,32 @@ def clean_dataframe(
 # ---------------------------------------------------------------------------
 # Data QA summary
 # ---------------------------------------------------------------------------
-def summarize_qa(name: str, df: pd.DataFrame) -> Dict:
+# Required standard fields per report type used to drive QA warnings.
+REQUIRED_FIELDS: Dict[str, List[str]] = {
+    "campaign": ["campaign_id", "spend", "impressions", "budget"],
+    "ad_group": ["ad_group_id", "spend", "impressions"],
+    "site": ["site", "spend", "impressions"],
+    "zip": ["zip", "spend", "impressions"],
+    "pmp": ["deal_id", "spend", "impressions"],
+    "exclusion_list": ["site"],
+    "approved_zips": ["zip"],
+}
+
+RECOMMENDED_FIELDS: Dict[str, List[str]] = {
+    "campaign": ["clicks", "conversions", "cpa", "viewability", "out_of_geo",
+                 "ivt", "pacing", "flight_start", "flight_end"],
+    "ad_group": ["clicks", "conversions", "cpa"],
+    "site": ["clicks", "conversions", "viewability", "out_of_geo", "ivt"],
+    "zip": ["clicks", "conversions", "out_of_geo"],
+    "pmp": ["floor_cpm", "bid", "win_rate", "cpa", "viewability"],
+}
+
+
+def summarize_qa(
+    name: str,
+    df: pd.DataFrame,
+    report_key: Optional[str] = None,
+) -> Dict:
     """Build a QA summary record for a given cleaned DataFrame."""
     if df is None or df.empty:
         return {
@@ -185,17 +210,37 @@ def summarize_qa(name: str, df: pd.DataFrame) -> Dict:
             "columns": 0,
             "missing_pct": 0.0,
             "duplicate_rows_remaining": 0,
+            "missing_required_fields": ", ".join(REQUIRED_FIELDS.get(report_key or "", [])),
+            "missing_recommended_fields": ", ".join(RECOMMENDED_FIELDS.get(report_key or "", [])),
             "notes": "Empty dataset",
         }
+
     missing = float(df.isna().sum().sum())
     cells = float(df.size) if df.size else 1.0
+    cols = set(df.columns)
+    missing_required = [f for f in REQUIRED_FIELDS.get(report_key or "", []) if f not in cols]
+    missing_recommended = [f for f in RECOMMENDED_FIELDS.get(report_key or "", []) if f not in cols]
+
+    notes_bits = []
+    if missing_required:
+        notes_bits.append(f"Missing required: {', '.join(missing_required)}")
+    if missing_recommended:
+        notes_bits.append(f"Missing recommended: {', '.join(missing_recommended)}")
+    pct = round(100.0 * missing / cells, 2)
+    if pct >= 25:
+        notes_bits.append(f"High missing-value rate ({pct}%)")
+    if not notes_bits:
+        notes_bits.append("OK")
+
     return {
         "report": name,
         "rows": int(len(df)),
         "columns": int(df.shape[1]),
-        "missing_pct": round(100.0 * missing / cells, 2),
+        "missing_pct": pct,
         "duplicate_rows_remaining": int(df.duplicated().sum()),
-        "notes": "OK",
+        "missing_required_fields": ", ".join(missing_required),
+        "missing_recommended_fields": ", ".join(missing_recommended),
+        "notes": "; ".join(notes_bits),
     }
 
 
@@ -203,5 +248,5 @@ def build_qa_dataframe(reports: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Build a single QA summary DataFrame across all uploaded reports."""
     rows: List[Dict] = []
     for name, df in reports.items():
-        rows.append(summarize_qa(name, df))
+        rows.append(summarize_qa(name, df, report_key=name))
     return pd.DataFrame(rows)
