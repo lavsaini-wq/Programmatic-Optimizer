@@ -1,0 +1,260 @@
+Build me a local-first web app called “Programmatic Optimization Recommendation Agent”.
+
+I am a programmatic advertising optimization analyst. I want this app to analyze campaign reports, build docs, exclusion lists, zip reports, PMP deal reports, and optional web case study summaries. The app should NOT make any changes in DSP. It should only provide recommendations for a human to review.
+
+Use Python, Streamlit, Pandas, OpenPyXL, XlsxWriter, and the DeepSeek API.
+
+Main goal:
+The app should allow the user to upload multiple Excel or CSV files, clean the data, calculate KPIs, apply rule-based optimization logic, send summarized findings to DeepSeek API, and generate a final recommendation report.
+
+Important:
+Do not connect to any DSP.
+Do not automate campaign changes.
+Do not pause campaigns.
+Do not change budgets.
+Do not remove brand safety or verification settings.
+This app is only a recommendation engine.
+
+Create the app with the following pages/sections:
+
+1. Upload Reports
+Allow users to upload:
+- Campaign performance report
+- Ad group report
+- Site/app report
+- Zip report
+- PMP deal report
+- Build doc
+- Exclusion list
+- Approved zip list
+- DV report, optional
+- Past optimization log, optional
+
+2. Data Mapping
+The app should allow the user to map uploaded file columns to standard fields.
+
+Standard campaign fields:
+- campaign_id
+- campaign_name
+- ad_group_id
+- ad_group_name
+- tactic
+- flight_start
+- flight_end
+- budget
+- spend
+- impressions
+- clicks
+- conversions
+- cpa
+- cpm
+- ctr
+- cvr
+- viewability
+- out_of_geo
+- ivt
+- frequency
+- base_bid
+- max_bid
+- pacing
+
+Standard site fields:
+- site
+- app
+- spend
+- impressions
+- clicks
+- conversions
+- cpa
+- ctr
+- viewability
+- out_of_geo
+- ivt
+
+Standard zip fields:
+- zip
+- dma
+- spend
+- impressions
+- clicks
+- conversions
+- cpa
+- out_of_geo
+- approved_status
+
+Standard PMP fields:
+- deal_id
+- deal_name
+- publisher
+- floor_cpm
+- bid
+- spend
+- impressions
+- win_rate
+- cpa
+- viewability
+
+3. Data Cleaning
+Create Python logic to:
+- Standardize column names
+- Remove blank rows
+- Remove duplicate rows
+- Convert currency fields to numbers
+- Convert percentage fields to numbers
+- Fix ZIP codes to 5-digit text format
+- Handle missing values
+- Create a Data QA summary
+
+4. KPI Calculations
+Calculate:
+- Spend pacing
+- Budget remaining
+- Daily required spend
+- CPA/CPO
+- CPM
+- CTR
+- CVR
+- Viewability gap
+- Out-of-geo gap
+- IVT gap
+- High-spend zero-conversion sites
+- Poor-performing zips
+- Strong-performing zips
+- PMP win-rate issues
+- PMP floor mismatch issues
+
+5. Rule-Based Optimization Engine
+
+Campaign health rules:
+- If pacing < 90% and CPA is below benchmark, classify as “Underpacing but efficient”
+- If pacing < 90% and CPA is above benchmark, classify as “Underpacing and inefficient”
+- If pacing is between 90% and 110% and CPA is below benchmark, classify as “Healthy”
+- If pacing > 110% and CPA is above benchmark, classify as “Overspending and inefficient”
+
+Site exclusion rules:
+Recommend site exclusion only if enough data exists:
+- Spend > user-defined threshold
+- AND conversions = 0 OR CPA > 2x benchmark
+- AND viewability is below goal OR out-of-geo is above threshold OR IVT is above threshold
+
+Zip optimization rules:
+Recommend zip removal/reduction if:
+- Spend is meaningful
+- AND conversions are zero or CPA is poor
+- AND out-of-geo is high
+- AND impressions/clicks are enough
+
+Recommend zip expansion if:
+- Campaign is underpacing
+- AND CPA is below benchmark
+- AND viewability is healthy
+- AND out-of-geo is under control
+- AND approved zip list has additional zips
+
+PMP deal rules:
+Flag PMP deal issues if:
+- Floor CPM is higher than bid or target CPM
+- Win rate is low
+- Spend is very low
+- CPA is poor
+- Viewability is poor
+- Deal has good KPI but low scale
+
+6. DeepSeek Reasoning Layer
+Use DeepSeek API to generate a final human-readable recommendation.
+
+Use environment variables:
+DEEPSEEK_API_KEY
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+
+Use the OpenAI-compatible client format if possible.
+
+Only send summarized data to DeepSeek, not full raw reports.
+
+The DeepSeek prompt should include:
+- Campaign health summary
+- KPI summary
+- Rule-based findings
+- Site recommendation candidates
+- Zip recommendation candidates
+- PMP deal findings
+- Build doc constraints
+- Existing exclusion list summary
+- Approved zip list summary
+- Optional web case study summaries
+
+DeepSeek should return valid JSON with:
+- campaign_id
+- campaign_name
+- health_status
+- confidence_score
+- executive_summary
+- top_issues
+- recommendations
+- do_not_change
+- human_next_steps
+
+7. Final Output
+Create a downloadable Excel file with these tabs:
+- Campaign Summary
+- Pacing Analysis
+- KPI Analysis
+- Site Recommendations
+- Zip Recommendations
+- PMP Deal Review
+- Final Recommendation
+- Do Not Change
+- Data QA
+
+Also create a clean on-screen dashboard in Streamlit showing:
+- Campaign health status
+- KPI cards
+- Top recommendations
+- Risk level
+- Human next steps
+
+8. UI Requirements
+Make the app simple and professional.
+Use clear section headers.
+Use tables for recommendation outputs.
+Use warning icons for risky recommendations.
+Use success icons for healthy metrics.
+Add user inputs for:
+- CPA benchmark
+- Viewability goal
+- Out-of-geo threshold
+- IVT threshold
+- Minimum spend threshold for exclusion
+- Pacing goal
+- Flight start date
+- Flight end date
+
+9. Guardrails
+The app must include a “Do Not Change” section.
+It should warn the user not to:
+- Remove DV/viewability rails without approval
+- Pause campaigns automatically
+- Change budgets automatically
+- Exclude sites/zips with low data
+- Use web case studies as stronger evidence than campaign data
+
+10. Deliverables
+Create all required files:
+- app.py
+- requirements.txt
+- README.md
+- modules/data_cleaner.py
+- modules/kpi_calculator.py
+- modules/optimization_rules.py
+- modules/deepseek_agent.py
+- modules/output_generator.py
+- modules/guardrails.py
+
+Add clear comments in the code so a non-technical user can understand what each part does.
+
+After building, explain how I can:
+- Add my DeepSeek API key
+- Run the app
+- Upload reports
+- Download the final recommendation Excel file
