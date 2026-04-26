@@ -1,0 +1,124 @@
+Fix this error in my Streamlit app:
+
+ValueError: cannot convert float NaN to integer
+
+It is happening in:
+modules/kpi_calculator.py
+inside build_kpi_summary()
+on this line:
+"impressions": int(pd.to_numeric(df.get("impressions"), errors="coerce").sum() or 0)
+
+Root cause:
+Some uploaded reports may have missing, blank, unmapped, or NaN values in numeric columns like impressions, clicks, conversions, spend, budget, viewability, out_of_geo, etc. The app should never crash because of NaN. It should safely convert NaN to 0 for totals.
+
+Please update modules/kpi_calculator.py by adding safe helper functions and replacing all direct int()/float() conversions with safe conversions.
+
+Add these helper functions near the top of kpi_calculator.py:
+
+import numpy as np
+import pandas as pd
+
+def _safe_numeric_series(df, column_name):
+    """
+    Safely return a numeric pandas Series.
+    Handles missing columns, duplicate columns, blanks, currency symbols, percentage signs, commas, NaN, and infinity.
+    """
+    if df is None or len(df) == 0 or column_name not in df.columns:
+        return pd.Series(dtype="float64")
+
+    series = df[column_name]
+
+    # If duplicate column names return a DataFrame, use the first matching column
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, 0]
+
+    series = (
+        series.astype(str)
+        .str.replace("$", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.strip()
+        .replace(["", "nan", "NaN", "None", "N/A", "NA", "-", "--"], np.nan)
+    )
+
+    numeric_series = pd.to_numeric(series, errors="coerce")
+    numeric_series = numeric_series.replace([np.inf, -np.inf], np.nan)
+
+    return numeric_series
+
+
+def safe_sum(df, column_name):
+    """
+    Safely sum a numeric column. Missing or invalid values become 0.
+    """
+    series = _safe_numeric_series(df, column_name)
+    if series.empty:
+        return 0.0
+    return float(series.fillna(0).sum())
+
+
+def safe_int_sum(df, column_name):
+    """
+    Safely sum a numeric column and return an integer.
+    """
+    return int(round(safe_sum(df, column_name)))
+
+
+def safe_avg(df, column_name):
+    """
+    Safely average a numeric column.
+    """
+    series = _safe_numeric_series(df, column_name).dropna()
+    if series.empty:
+        return 0.0
+    return float(series.mean())
+
+
+def safe_divide(numerator, denominator):
+    """
+    Safely divide two values.
+    """
+    try:
+        numerator = float(numerator or 0)
+        denominator = float(denominator or 0)
+        if denominator == 0:
+            return 0.0
+        return numerator / denominator
+    except Exception:
+        return 0.0
+
+
+Then update build_kpi_summary() so it does not use direct int(pd.to_numeric(...).sum()).
+
+Replace calculations like this:
+
+"impressions": int(pd.to_numeric(df.get("impressions"), errors="coerce").sum() or 0)
+
+with:
+
+"impressions": safe_int_sum(df, "impressions")
+
+Also update similar fields:
+
+"clicks": safe_int_sum(df, "clicks")
+"conversions": safe_sum(df, "conversions")
+"spend": safe_sum(df, "spend")
+"budget": safe_sum(df, "budget")
+"viewability": safe_avg(df, "viewability")
+"out_of_geo": safe_avg(df, "out_of_geo")
+"ivt": safe_avg(df, "ivt")
+
+Also make sure CPA, CPM, CTR, and CVR use safe_divide:
+
+total_spend = safe_sum(df, "spend")
+total_impressions = safe_sum(df, "impressions")
+total_clicks = safe_sum(df, "clicks")
+total_conversions = safe_sum(df, "conversions")
+total_budget = safe_sum(df, "budget")
+
+cpa = safe_divide(total_spend, total_conversions)
+cpm = safe_divide(total_spend, total_impressions) * 1000
+ctr = safe_divide(total_clicks, total_impressions)
+cvr = safe_divide(total_conversions, total_clicks)
+
+The app should continue running even if a column is missing or blank. It should also add a warning in the Data QA tab if an important column is missing instead of crashing.

@@ -26,6 +26,71 @@ def _safe_div(num, denom):
     return np.where((denom == 0) | denom.isna(), np.nan, num / denom)
 
 
+# ---------------------------------------------------------------------------
+# Safe scalar helpers — never raise on missing columns / NaN / dirty strings
+# ---------------------------------------------------------------------------
+def _safe_numeric_series(df, column_name) -> pd.Series:
+    """Return a numeric Series from df[column_name], tolerant of:
+    - missing column
+    - duplicate column names (DataFrame instead of Series)
+    - currency, comma, percent, whitespace
+    - blank / "nan" / "None" / "N/A" / "-" sentinels
+    - infinities
+    """
+    if df is None or len(df) == 0 or column_name not in df.columns:
+        return pd.Series(dtype="float64")
+
+    series = df[column_name]
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, 0]
+
+    series = (
+        series.astype(str)
+        .str.replace("$", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.strip()
+        .replace(["", "nan", "NaN", "None", "N/A", "NA", "-", "--"], np.nan)
+    )
+
+    numeric_series = pd.to_numeric(series, errors="coerce")
+    numeric_series = numeric_series.replace([np.inf, -np.inf], np.nan)
+    return numeric_series
+
+
+def safe_sum(df, column_name) -> float:
+    """Sum a numeric column safely; missing/invalid become 0."""
+    series = _safe_numeric_series(df, column_name)
+    if series.empty:
+        return 0.0
+    return float(series.fillna(0).sum())
+
+
+def safe_int_sum(df, column_name) -> int:
+    """Sum a numeric column and return an integer."""
+    return int(round(safe_sum(df, column_name)))
+
+
+def safe_avg(df, column_name) -> float:
+    """Mean of a numeric column; ignores NaN; returns 0.0 if empty."""
+    series = _safe_numeric_series(df, column_name).dropna()
+    if series.empty:
+        return 0.0
+    return float(series.mean())
+
+
+def safe_divide(numerator, denominator) -> float:
+    """Divide two scalars safely; 0 denominator or invalid → 0.0."""
+    try:
+        n = float(numerator or 0)
+        d = float(denominator or 0)
+        if d == 0:
+            return 0.0
+        return n / d
+    except Exception:
+        return 0.0
+
+
 def _to_dt(value) -> Optional[datetime]:
     if value is None:
         return None
@@ -171,33 +236,34 @@ def build_kpi_summary(
         return summary
 
     df = campaign_df
-    totals = {
-        "spend": float(pd.to_numeric(df.get("spend"), errors="coerce").sum() or 0.0),
-        "impressions": int(pd.to_numeric(df.get("impressions"), errors="coerce").sum() or 0),
-        "clicks": int(pd.to_numeric(df.get("clicks"), errors="coerce").sum() or 0),
-        "conversions": int(pd.to_numeric(df.get("conversions"), errors="coerce").sum() or 0),
-    }
-    summary["total_spend"] = round(totals["spend"], 2)
-    summary["total_impressions"] = totals["impressions"]
-    summary["total_clicks"] = totals["clicks"]
-    summary["total_conversions"] = totals["conversions"]
 
-    if totals["conversions"] > 0:
-        summary["blended_cpa"] = round(totals["spend"] / totals["conversions"], 2)
-    if totals["impressions"] > 0:
-        summary["blended_cpm"] = round(totals["spend"] / totals["impressions"] * 1000.0, 2)
-        summary["blended_ctr"] = round(totals["clicks"] / totals["impressions"], 4)
-    if totals["clicks"] > 0:
-        summary["blended_cvr"] = round(totals["conversions"] / totals["clicks"], 4)
+    total_spend = safe_sum(df, "spend")
+    total_impressions = safe_sum(df, "impressions")
+    total_clicks = safe_sum(df, "clicks")
+    total_conversions = safe_sum(df, "conversions")
+    total_budget = safe_sum(df, "budget")
 
-    for key, src in [
-        ("avg_pacing", "pacing_calc" if "pacing_calc" in df.columns else "pacing"),
-        ("avg_viewability", "viewability"),
-        ("avg_out_of_geo", "out_of_geo"),
-        ("avg_ivt", "ivt"),
-    ]:
-        if src and src in df.columns:
-            val = pd.to_numeric(df[src], errors="coerce").mean()
-            summary[key] = round(float(val), 4) if pd.notna(val) else None
+    summary["total_spend"] = round(total_spend, 2)
+    summary["total_impressions"] = safe_int_sum(df, "impressions")
+    summary["total_clicks"] = safe_int_sum(df, "clicks")
+    summary["total_conversions"] = safe_int_sum(df, "conversions")
+    summary["total_budget"] = round(total_budget, 2)
+
+    cpa = safe_divide(total_spend, total_conversions)
+    cpm = safe_divide(total_spend, total_impressions) * 1000.0
+    ctr = safe_divide(total_clicks, total_impressions)
+    cvr = safe_divide(total_conversions, total_clicks)
+
+    summary["blended_cpa"] = round(cpa, 2) if total_conversions > 0 else None
+    summary["blended_cpm"] = round(cpm, 2) if total_impressions > 0 else None
+    summary["blended_ctr"] = round(ctr, 4) if total_impressions > 0 else None
+    summary["blended_cvr"] = round(cvr, 4) if total_clicks > 0 else None
+
+    pacing_col = "pacing_calc" if "pacing_calc" in df.columns else "pacing"
+    pacing_avg = safe_avg(df, pacing_col)
+    summary["avg_pacing"] = round(pacing_avg, 4) if pacing_col in df.columns else None
+    summary["avg_viewability"] = round(safe_avg(df, "viewability"), 4) if "viewability" in df.columns else None
+    summary["avg_out_of_geo"] = round(safe_avg(df, "out_of_geo"), 4) if "out_of_geo" in df.columns else None
+    summary["avg_ivt"] = round(safe_avg(df, "ivt"), 4) if "ivt" in df.columns else None
 
     return summary
