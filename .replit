@@ -11,6 +11,27 @@ env = { "CI" = "true" }
 [workflows]
 runButton = "Project"
 
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Streamlit App"
+
+[[workflows.workflow]]
+name = "Streamlit App"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "streamlit run app.py --server.port 5000"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
@@ -20,9 +41,23 @@ path = "scripts/post-merge.sh"
 timeoutMs = 20000
 
 [[ports]]
+localPort = 5000
+externalPort = 5000
+
+[[ports]]
 localPort = 8080
 externalPort = 8080
 
 [[ports]]
 localPort = 8081
 externalPort = 80
+
+[nix]
+channel = "stable-25_05"
+packages = ["glibcLocales"]
+
+[userenv]
+
+[userenv.shared]
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
